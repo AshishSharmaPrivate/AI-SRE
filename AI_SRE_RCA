@@ -132,10 +132,21 @@ stress --cpu 4 --timeout 300
 This triggers: CloudWatch → Lambda → AI → Email 🔥
 
 What This Lab Demonstrates
-This demo proves you can build:
-AI-driven incident response Cloud monitoring automation Event-driven serverless pipeline Infrastructure as Code (Terraform) AWS Bedrock AI integration   …………………………………………………………………….
 
-Actual Implementation:   Provision Infrastructure:   Create main.tf and add below config:    ……………………………  
+This demo proves you can build:
+AI-driven incident response Cloud monitoring automation Event-driven pipeline Infrastructure as Code (Terraform) AWS Bedrock AI integration 
+
+
+…………………………………………………………………….
+
+Actual Implementation:   
+
+Provision Infrastructure:   
+Create main.tf and add below config:   
+
+……………………………  
+
+
 provider "aws" {
   region = "us-east-1"
 }
@@ -396,6 +407,7 @@ def lambda_handler(event, context):
 
 …………………………….  
 
+sudo apt install zip
 zip lambda.zip lambda_function.py  
 
 ……………………………..  
