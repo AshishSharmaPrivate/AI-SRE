@@ -1,0 +1,455 @@
+AI-Powered Incident Response  - RCA Summary  
+
+We built an end-to-end AI SRE automation pipeline on AWS using Amazon Web Services.
+
+The goal of this lab:
+
+When EC2 CPU goes high → CloudWatch triggers alarm → Lambda calls AI model → AI generates RCA report → Email with incident + remediation is sent automatically.
+This simulates a real SRE incident auto-response system.
+
+Architecture Overview
+
+EC2 (CPU spike generator)
+        ↓
+CloudWatch Alarm (High CPU)
+        ↓
+SNS Topic (Alarm trigger)
+        ↓
+Lambda (AI RCA Engine)
+        ↓
+Amazon Bedrock (Nova model)
+        ↓
+SNS Email Topic
+        ↓
+Incident Report Email
+
+This is a fully automated AI incident pipeline.
+
+Files We Create
+You only maintain 2 files:
+
+
+What Terraform Builds Automatically
+Your main.tf provisions EVERYTHING:
+IAM + Security
+Lambda IAM role
+Permissions for:
+CloudWatch logs
+SNS publish
+Bedrock model invoke
+
+EC2 Incident Generator
+Creates an EC2 instance that:
+Used to generate CPU load for testing
+Opens ports:
+22 → SSH access
+80 → Web app access 
+
+
+Monitoring
+Creates CloudWatch alarm:
+Alarm: HighCPU-AI-SRE
+Metric: EC2 CPUUtilization
+Threshold: > 70%
+Duration: 2 minutes
+This simulates a real production alert.
+
+SNS Topics (2 Topics)
+Alarm Trigger Topic
+Used internally:
+
+CloudWatch → Lambda
+
+Email Notification Topic
+Used to send AI report to you:
+
+Lambda → Your Email
+
+Terraform also auto-subscribes your email ✔️
+
+Lambda Function
+Terraform deploys:
+
+Function name: ai-rca-engine
+Runtime: Python 3.12
+
+Triggered automatically when alarm fires.
+
+AI Engine (Lambda File)
+Your lambda_function.py does the magic.
+What happens inside Lambda
+1️⃣ Receives CloudWatch alarm event 2️⃣ Calls Amazon Bedrock (Nova model) 3️⃣ Asks AI to generate SRE report:
+Prompt sent to AI:
+
+CloudWatch alarm triggered: High CPU on EC2.
+Generate:
+• Incident Summary
+• Root Cause
+• Impact
+• Remediation
+• Prevention
+
+4️⃣ AI generates RCA text 5️⃣ Lambda sends email via SNS
+Fully automated — no human involved.
+
+Final Output You Receive
+When CPU spikes, you get email like:
+Subject
+
+AI SRE Incident Report
+
+Body (AI Generated) Example:
+
+Incident Summary:
+High CPU utilization detected on EC2 instance.
+
+Root Cause:
+Likely traffic spike or runaway process.
+
+Impact:
+Application performance degradation.
+
+Remediation:
+Restart service / scale instance.
+
+Prevention:
+Enable auto scaling and monitoring.
+
+This is your AI-generated incident report.
+
+How We Test
+We validated the pipeline in 2 ways:
+Test 1 — Manual Lambda Test
+Click Test in Lambda → confirms:
+AI invocation works
+SNS email works 
+Test 2 — Real Incident Simulation
+Run CPU stress on EC2:
+
+sudo apt install stress -y
+stress --cpu 4 --timeout 300
+
+This triggers: CloudWatch → Lambda → AI → Email 🔥
+
+What This Lab Demonstrates
+This demo proves you can build:
+AI-driven incident response Cloud monitoring automation Event-driven serverless pipeline Infrastructure as Code (Terraform) AWS Bedrock AI integration   …………………………………………………………………….
+
+Actual Implementation:   Provision Infrastructure:   Create main.tf and add below config:    ……………………………  
+provider "aws" {
+  region = "us-east-1"
+}
+
+################################################
+# EMAIL VARIABLE (only thing you edit)
+################################################
+variable "alert_email" {
+  default = "ashish.9.sharma@niit.com"
+}
+
+################################################
+# SSH KEY (auto generated)
+################################################
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "local_file" "private_key" {
+  filename        = "ai-sre-key.pem"
+  content         = tls_private_key.ssh_key.private_key_pem
+  file_permission = "0400"
+}
+
+resource "aws_key_pair" "generated" {
+  key_name   = "ai-sre-key"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+}
+
+################################################
+# SECURITY GROUP (SSH access)
+################################################
+resource "aws_security_group" "demo_sg" {
+  name = "ai-sre-demo-sg"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+################################################
+# EC2 INCIDENT GENERATOR
+################################################
+resource "aws_instance" "demo" {
+  ami                         = "ami-0c7217cdde317cfec"
+  instance_type               = "t2.micro"
+  key_name                    = aws_key_pair.generated.key_name
+  vpc_security_group_ids      = [aws_security_group.demo_sg.id]
+  associate_public_ip_address = true
+
+  tags = { Name = "AI-SRE-Demo" }
+}
+
+################################################
+# CLOUDWATCH CPU ALARM
+################################################
+resource "aws_cloudwatch_metric_alarm" "cpu_alarm" {
+  alarm_name          = "HighCPU-AI-SRE"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 20
+
+  dimensions = {
+    InstanceId = aws_instance.demo.id
+  }
+
+  alarm_actions = [aws_sns_topic.alarm_topic.arn]
+}
+
+################################################
+# SNS TOPIC (ALARM → LAMBDA)
+################################################
+resource "aws_sns_topic" "alarm_topic" {
+  name = "ai-sre-alarm-topic"
+}
+
+################################################
+# SNS TOPIC (LAMBDA → EMAIL)
+################################################
+resource "aws_sns_topic" "email_topic" {
+  name = "ai-sre-email-topic"
+}
+
+resource "aws_sns_topic_subscription" "email_sub" {
+  topic_arn = aws_sns_topic.email_topic.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+################################################
+# LAMBDA IAM ROLE
+################################################
+resource "aws_iam_role" "lambda_role" {
+  name = "ai-sre-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = "sts:AssumeRole",
+      Effect = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_policy" {
+  name = "ai-sre-lambda-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect="Allow",
+        Action=["logs:*"],
+        Resource="*"
+      },
+      {
+        Effect="Allow",
+        Action=["sns:Publish"],
+        Resource="*"
+      },
+      {
+        Effect="Allow",
+        Action=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+        Resource="*"
+      },
+    ]
+  })
+}
+
+################################################
+# LAMBDA FUNCTION
+################################################
+resource "aws_lambda_function" "ai_rca" {
+  filename         = "lambda.zip"
+  function_name    = "ai-rca-engine"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 60
+  source_code_hash = filebase64sha256("lambda.zip")
+
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.email_topic.arn
+    }
+  }
+}
+
+################################################
+# ALLOW SNS → LAMBDA
+################################################
+resource "aws_lambda_permission" "allow_sns" {
+  statement_id  = "AllowSNSInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ai_rca.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.alarm_topic.arn
+}
+
+################################################
+# SUBSCRIBE LAMBDA TO ALARM
+################################################
+resource "aws_sns_topic_subscription" "lambda_sub" {
+  topic_arn = aws_sns_topic.alarm_topic.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.ai_rca.arn
+}
+
+################################################
+# OUTPUT EC2 IP
+################################################
+output "EC2_PUBLIC_IP" {
+  value = aws_instance.demo.public_ip
+}
+
+
+ ……………………………............................ 
+
+
+## Now create Lamda function.   vi lambda_function.py and below config 
+ ……………………………..............................
+
+import json
+import boto3
+import os
+
+sns = boto3.client("sns")
+bedrock = boto3.client("bedrock-runtime")
+
+MODEL_ID = "amazon.nova-lite-v1:0"
+
+def generate_ai_rca():
+
+    response = bedrock.converse(
+        modelId=MODEL_ID,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": """
+CloudWatch Alarm Triggered: EC2 High CPU > 70%.
+
+Create a professional SRE Incident Report with:
+1. Incident Summary
+2. Root Cause
+3. Customer Impact
+4. Immediate Fix
+5. Prevention Steps
+"""
+                    }
+                ],
+            }
+        ],
+        inferenceConfig={
+            "maxTokens": 400,
+            "temperature": 0.3
+        },
+    )
+
+    return response["output"]["message"]["content"][0]["text"]
+
+
+def lambda_handler(event, context):
+    print("Generating AI RCA via Nova...")
+
+    report = generate_ai_rca()
+
+    sns.publish(
+        TopicArn=os.environ["SNS_TOPIC_ARN"],
+        Subject="AI SRE Incident Report",
+        Message=report
+    )
+
+    return {"status": "SUCCESS"}
+
+
+……………………………........................
+
+#### Deploy Lambda ZIP :  
+
+…………………………….  
+
+zip lambda.zip lambda_function.py  
+
+……………………………..  
+
+#### DEPLOY Infra :   
+
+terraform init
+terraform plan
+terraform apply  
+
+……………………………..  
+
+##### TEST NOW :  
+
+……………………………… 
+
+ssh -i ai-sre-key.pem ubuntu@<EC2_PUBLIC_IP>
+sudo apt update && sudo apt install stress -y
+stress --cpu 2 --timeout 300  
+
+…………………………………  
+
+Demo Flow
+
+Alarm → Lambda → Bedrock → Email → AI RCA report
+
+…………………………………..
+
+[ NOTE: below step is Just for Test if function work] 
+
+Test Lambda from AWS Console (Manual Trigger)
+Step 1 — Open Lambda
+Go to AWS Console
+Search → Lambda
+Open your function → ai-rca-engine
+
+Step 2 — Create Test Event 
+Click Test button (top right)
+Click Create new test event
+Event name → manual-test
+Replace JSON with this:
+
+……………………………
+
+
+{
+  "source": "manual-test",
+  "alarm": "HighCPU-AI-SRE"
+}
+
+…………………………….
+
+
+
+Final Summary
+We built a fully automated AI SRE system that detects incidents, generates RCA using AI, and emails remediation steps — without human intervention.
+
