@@ -1,0 +1,493 @@
+AI Capacity Planning using AWS + Terraform + Lambda
+
+We will built a AI SRE system that:
+
+################################################################
+
+Collects real CPU metrics from EC2
+Sends metrics to AI (Amazon Bedrock Nova Lite)
+AI predicts capacity planning & scaling recommendation
+Sends email report
+Entire infra created via Terraform
+
+################################################################
+
+
+Architecture Overview
+Flow:
+EC2 → CloudWatch Metrics → Lambda → Bedrock AI → SNS → Email
+Manual trigger (demo mode).
+
+Project Structure
+Your local folder should look like:
+
+ai-capacity-planning/
+│
+├── main.tf
+├── lambda_capacity.py
+├── package/              (requests dependency)
+└── lambda.zip
+
+
+STEP 1 — Terraform Infrastructure
+We create:
+Resources created via Terraform
+EC2 Instance
+Purpose:
+Generates real CPU usage data
+Features:
+Ubuntu AMI
+Port 22 open for SSH
+IAM role attached (VERY IMPORTANT)
+CloudWatch permissions enabled
+This EC2 is the data source for capacity planning.
+
+IAM Roles
+We created 2 IAM roles:
+EC2 Role → CloudWatch access
+Allows EC2 to publish metrics.
+Policy:
+
+CloudWatchAgentServerPolicy
+
+Lambda Role → Full access to:
+CloudWatch metrics
+Bedrock AI
+SNS email
+This role allows Lambda to:
+Read CPU metrics
+Call AI model
+Send email
+
+SNS Topic (Email Sender)
+We created SNS topic:
+
+capacity-planning-alerts
+
+You subscribed your email.
+Purpose: Lambda → sends AI report → SNS → Email.
+
+Lambda Function
+Name:
+
+ai-capacity-planner
+
+Runtime:
+
+Python 3.12
+
+Handler:
+
+lambda_capacity.lambda_handler
+
+Zip uploaded:
+
+lambda.zip
+
+
+STEP 2 — Lambda Logic (Core Brain)
+File: lambda_capacity.py
+This Lambda does 3 things:
+
+Step A — Fetch Real CPU Metrics
+Lambda reads CloudWatch metrics of EC2:
+It fetches:
+
+CPUUtilization
+Namespace: AWS/EC2
+Last 6 datapoints (demo)
+
+Example real data:
+
+64, 0, 41, 99
+
+This is REAL usage from your EC2.
+
+
+Step B — Send metrics to AI (Bedrock Nova Lite)
+We use Amazon Bedrock model:
+
+amazon.nova-lite-v1:0
+
+Lambda sends prompt:
+
+Here is real EC2 CPU usage data: [64,0,41,99]
+Provide EC2 capacity planning recommendation.
+No assumptions.
+No Kubernetes.
+Only EC2 scaling advice.
+
+AI generates:
+Analysis
+Peak detection
+Scaling recommendation
+
+Step C — Email the AI Report
+Lambda publishes result to SNS.
+You receive email like:
+Subject:
+
+AI Capacity Planning Report
+
+Body: AI generated recommendation.
+
+STEP 3 — Dependency Packaging
+Lambda doesn’t have requests library by default.
+So we packaged it manually.
+Commands you ran:
+
+mkdir package
+pip3 install requests -t package/
+
+cd package
+zip -r ../lambda.zip .
+cd ..
+zip -g lambda.zip lambda_capacity.py
+
+This created final deployment zip.
+
+STEP 4 — Deploy Infra
+You ran:
+
+terraform init
+terraform apply
+
+Terraform created:
+EC2
+IAM roles
+SNS
+Lambda 
+Fully automated infra
+
+STEP 5 — Generate CPU Load (Test Data)
+SSH into EC2:
+
+ssh -i key.pem ubuntu@<public-ip>
+
+Install stress tool:
+
+sudo apt update
+sudo apt install stress -y
+
+Generate CPU spike:
+
+stress --cpu 2 --timeout 300
+
+Now CloudWatch has real CPU metrics.
+
+
+STEP 6 — Manual Lambda Test
+
+Go to Lambda Console → Test → Create Event
+
+Use dummy event:
+
+{}
+
+Click Test.
+What happens internally:
+Lambda reads CPU metrics 
+Sends metrics to AI 
+AI generates capacity plan 
+SNS sends email 
+You receive email = SUCCESS.
+
+What Happens After CPU Spike?
+After stress test:
+CloudWatch metrics increase → Lambda reads spike → AI sees peak → AI recommends scaling.
+This simulates real SRE capacity planning.  
+
+#####  Lets Start Implementing :  
+
+Create main.tf file and below configuration:   
+
+
+………………………………
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+############################
+# KEY PAIR
+############################
+resource "tls_private_key" "key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "local_file" "private_key" {
+  content  = tls_private_key.key.private_key_pem
+  filename = "ec2-key.pem"
+  file_permission = "0400"
+}
+
+resource "aws_key_pair" "generated" {
+  key_name   = "capacity-key"
+  public_key = tls_private_key.key.public_key_openssh
+}
+
+############################
+# SECURITY GROUP (SSH)
+############################
+resource "aws_security_group" "ec2_sg" {
+  name = "capacity-sg"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+############################
+# IAM ROLE FOR EC2
+############################
+resource "aws_iam_role" "ec2_role" {
+  name = "capacity-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = "sts:AssumeRole",
+      Effect = "Allow",
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ec2_policy" {
+  role = aws_iam_role.ec2_role.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect="Allow",
+      Action=["cloudwatch:*"],
+      Resource="*"
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  role = aws_iam_role.ec2_role.name
+}
+
+############################
+# UBUNTU EC2 INSTANCE
+############################
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+}
+
+resource "aws_instance" "ec2" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t2.micro"
+  key_name      = aws_key_pair.generated.key_name
+  security_groups = [aws_security_group.ec2_sg.name]
+  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+}
+
+############################
+# SNS EMAIL
+############################
+resource "aws_sns_topic" "email_topic" {
+  name = "capacity-ai-email"
+}
+
+resource "aws_sns_topic_subscription" "email_sub" {
+  topic_arn = aws_sns_topic.email_topic.arn
+  protocol  = "email"
+  endpoint  = "ashish.9.sharma@niit.com"
+}
+
+############################
+# LAMBDA IAM ROLE
+############################
+resource "aws_iam_role" "lambda_role" {
+  name = "capacity-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = "sts:AssumeRole",
+      Effect = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_policy" {
+  role = aws_iam_role.lambda_role.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      { Effect="Allow", Action=["logs:*"], Resource="*" },
+      { Effect="Allow", Action=["sns:Publish"], Resource="*" },
+      { Effect="Allow", Action=["cloudwatch:GetMetricStatistics"], Resource="*" },
+      { Effect="Allow", Action=["bedrock:InvokeModel"], Resource="*" }
+    ]
+  })
+}
+
+############################
+# LAMBDA FUNCTION
+############################
+resource "aws_lambda_function" "capacity" {
+  filename      = "lambda.zip"
+  function_name = "capacity-ai"
+  role          = aws_iam_role.lambda_role.arn
+  handler       = "lambda_capacity.lambda_handler"
+  runtime       = "python3.12"
+  timeout       = 60
+
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.email_topic.arn
+      INSTANCE_ID   = aws_instance.ec2.id
+    }
+  }
+}
+
+……………………………….      
+
+
+#### Now, create lambda_capacity.py file and add below configuration:     
+
+
+………………………………………..
+
+import boto3
+import json
+import os
+import requests
+from datetime import datetime, timedelta
+
+sns = boto3.client("sns")
+cw = boto3.client("cloudwatch")
+
+INSTANCE_ID = os.environ["INSTANCE_ID"]
+TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+def get_cpu_metrics():
+    end = datetime.utcnow()
+    start = end - timedelta(hours=3)
+
+    metrics = cw.get_metric_statistics(
+        Namespace='AWS/EC2',
+        MetricName='CPUUtilization',
+        Dimensions=[{'Name':'InstanceId','Value':INSTANCE_ID}],
+        StartTime=start,
+        EndTime=end,
+        Period=300,
+        Statistics=['Average']
+    )
+
+    points = [str(int(x["Average"])) for x in metrics["Datapoints"]]
+    return ", ".join(points)
+
+def call_bedrock(cpu_data):
+    bedrock = boto3.client("bedrock-runtime")
+
+    prompt = f"""
+You are an SRE doing EC2 capacity planning.
+
+IMPORTANT RULES:
+- Use ONLY the CPU metrics provided below.
+- DO NOT make assumptions.
+- DO NOT mention Kubernetes, containers, pods, HPA, or autoscaling groups.
+- This system uses a SINGLE EC2 instance.
+- Give recommendations ONLY for EC2 instance sizing or scaling.
+- If data is limited, say "Data is limited but based on available metrics".
+
+CPU Utilization datapoints (%):
+{cpu_values}
+
+Provide output in this EXACT format:
+
+EC2 Capacity Report
+
+1) Observed CPU Pattern
+2) Current Risk Level (Low/Medium/High)
+3) 24h Capacity Prediction
+4) EC2 Recommendation (scale up / keep same / scale down)
+5) Suggested Instance Type Change (if needed)
+"""
+
+    body = {
+        "messages":[{"role":"user","content":[{"text":prompt}]}]
+    }
+
+    response = bedrock.invoke_model(
+        modelId="amazon.nova-lite-v1:0",
+        body=json.dumps(body)
+    )
+
+    result = json.loads(response["body"].read())
+    return result["output"]["message"]["content"][0]["text"]
+
+def lambda_handler(event, context):
+    cpu_data = get_cpu_metrics()
+    report = call_bedrock(cpu_data)
+
+    sns.publish(
+        TopicArn=TOPIC_ARN,
+        Subject="AI Capacity Planning Report",
+        Message=report
+    )
+
+    return {"status":"success"}
+
+
+
+………………………………………..    
+
+Now, run below steps:   
+
+………………………………………..  
+
+mkdir package
+pip3 install requests -t package/
+
+cd package
+zip -r ../lambda.zip .
+cd ..
+zip -g lambda.zip lambda_capacity.py  
+
+………………………………………….   
+
+Now, Deploy:    
+
+……………………………………………
+
+terraform init
+terraform plan
+terraform apply  
+
+……………………………………………   
+
+>>>>>> FINAL SUMMARY <<<<<<<<<
+
+What we built
+You now have a working AI SRE Capacity Planner.
+
+It can:
+✔ Collect real EC2 CPU data 
+✔ Analyze usage patterns 
+✔ Predict scaling needs 
+✔ Generate AI recommendation 
+Email report automatically 
+✔ Entire infra via Terraform
