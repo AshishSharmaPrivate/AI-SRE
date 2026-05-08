@@ -65,7 +65,7 @@ Used to send AI report to you:
 
 Lambda → Your Email
 
-Terraform also auto-subscribes your email ✔️
+Terraform also auto-subscribes your email 
 
 Lambda Function
 Terraform deploys:
@@ -77,8 +77,14 @@ Triggered automatically when alarm fires.
 
 AI Engine (Lambda File)
 Your lambda_function.py does the magic.
+
 What happens inside Lambda
-1️⃣ Receives CloudWatch alarm event 2️⃣ Calls Amazon Bedrock (Nova model) 3️⃣ Asks AI to generate SRE report:
+
+1️ Receives CloudWatch alarm event 
+2️ Calls Amazon Bedrock (Nova model) 
+3️ Asks AI to generate SRE report:
+
+
 Prompt sent to AI:
 
 CloudWatch alarm triggered: High CPU on EC2.
