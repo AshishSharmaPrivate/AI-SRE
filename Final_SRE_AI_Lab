@@ -1,0 +1,2051 @@
+End-to-End AI-Enabled SRE Transformation Lab: 
+
+We will be implementing a fully functional near production grade AI Assisted Incident Detection and Recovery Automation Lab.
+
+Task: 
+
+Production Incident: 
+
+The Order API is experiencing customer-impacting degradation.
+"Investigate the incident, identify the likely root cause using available observability and AI assistance, remediate the issue, and provide an evidence-based incident report."
+
+................................................
+
+We will be using below resources to complete the implementation: 
+
+
+AWS EC2
+Terraform for fully automated provisioning
+Docker Compose
+Python Order API
+Prometheus + Grafana
+Intentional production incident
+Amazon Bedrock for AI-assisted RCA
+Automated remediation + validation
+AI-generated incident report
+
+
+Architecture: 
+
+                         AWS
+                          │
+                    ┌─────▼─────┐
+                    │    VPC    │
+                    │  Public   │
+                    │  Subnet   │
+                    └─────┬─────┘
+                          │
+                    ┌─────▼───────────┐
+                    │  EC2 Ubuntu     │
+                    │  t3.medium      │
+                    │                 │
+                    │ Docker Compose  │
+                    │                 │
+                    │ ┌─────────────┐ │
+                    │ │ Order API   │ │
+                    │ │ :8000       │ │
+                    │ └──────┬──────┘ │
+                    │        │ metrics│
+                    │ ┌──────▼──────┐ │
+                    │ │ Prometheus  │ │
+                    │ │ :9090       │ │
+                    │ └──────┬──────┘ │
+                    │        │         │
+                    │ ┌──────▼──────┐ │
+                    │ │ Grafana     │ │
+                    │ │ :3000       │ │
+                    │ └─────────────┘ │
+                    │                 │
+                    │ AI-SRE          │
+                    │ Python          │
+                    └────────┬────────┘
+                             │
+                             │ IAM Role
+                             ▼
+                    ┌──────────────────┐
+                    │ Amazon Bedrock   │
+                    │ Nova Lite        │
+                    │                  │
+                    │ AI RCA           │
+                    │ AI Report        │
+                    └──────────────────┘
+
+
+Implementation flow: 
+
+...........................................
+
+Incident → Observe → Investigate → AI RCA → Human decision → Remediate → Validate → Report
+
+.............................................
+
+Project structure: 
+
+
+ai-sre-lab/
+│
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── versions.tf
+├── user_data.sh
+│
+├── app/
+│   ├── app.py
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── prometheus/
+│   └── prometheus.yml
+│
+├── grafana/
+│   └── dashboard.json
+│
+├── ai-sre/
+│   ├── ai_sre.py
+│   └── requirements.txt
+│
+└── scripts/
+    ├── inject_failure.sh
+    ├── recover.sh
+    └── validate.sh
+
+.........................
+
+Lets start implementing : 
+
+.........................
+
+
+### Create versions.tf file with below config: (Line 115-128)
+
+..........................
+
+terraform {
+  required_version = ">= 1.6.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+.....................................................
+
+### Create variables.tf with below config:  (Line 136-170)
+
+.......................................................
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-2"
+}
+
+variable "project_name" {
+  description = "Project name"
+  type        = string
+  default     = "ai-sre-lab"
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "allowed_cidr" {
+  description = "CIDR allowed to access the lab"
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "bedrock_model_id" {
+  description = "Amazon Bedrock model ID"
+  type        = string
+  default     = "amazon.nova-lite-v1:0"
+}
+
+variable "slo_target" {
+  description = "Availability SLO"
+  type        = number
+  default     = 99
+}
+
+................................................
+
+
+### create main.tf with below config: (Line 180-409)
+
+
+............................................................................................................
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+}
+
+# ------------------------------------------------------------
+# VPC
+# ------------------------------------------------------------
+
+resource "aws_vpc" "lab" {
+  cidr_block           = "10.20.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name    = "${var.project_name}-vpc"
+    Project = var.project_name
+  }
+}
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.lab.id
+  cidr_block              = "10.20.1.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name    = "${var.project_name}-public-subnet"
+    Project = var.project_name
+  }
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.lab.id
+
+  tags = {
+    Name = "${var.project_name}-igw"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.lab.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-public-rt"
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+# ------------------------------------------------------------
+# Security Group
+# ------------------------------------------------------------
+
+resource "aws_security_group" "lab" {
+  name        = "${var.project_name}-sg"
+  description = "Security group for AI SRE lab"
+  vpc_id      = aws_vpc.lab.id
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_cidr]
+  }
+
+  ingress {
+    description = "Order API"
+    from_port   = 8000
+    to_port     = 8000
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_cidr]
+  }
+
+  ingress {
+    description = "Grafana"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_cidr]
+  }
+
+  ingress {
+    description = "Prometheus"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_cidr]
+  }
+
+  egress {
+    description = "Internet access"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-sg"
+  }
+}
+
+# ------------------------------------------------------------
+# IAM role for EC2
+# ------------------------------------------------------------
+
+resource "aws_iam_role" "sre_role" {
+  name = "${var.project_name}-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "bedrock" {
+  name = "${var.project_name}-bedrock-policy"
+  role = aws_iam_role.sre_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
+        ]
+
+        Resource = [
+          "arn:aws:bedrock:${var.aws_region}::foundation-model/${var.bedrock_model_id}"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "sre_profile" {
+  name = "${var.project_name}-instance-profile"
+  role = aws_iam_role.sre_role.name
+}
+
+# ------------------------------------------------------------
+# EC2
+# ------------------------------------------------------------
+
+resource "aws_instance" "sre_lab" {
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.lab.id]
+  iam_instance_profile        = aws_iam_instance_profile.sre_profile.name
+  associate_public_ip_address = true
+
+  user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh", {
+    project_name  = var.project_name
+    bedrock_model = var.bedrock_model_id
+    aws_region    = var.aws_region
+    slo_target    = var.slo_target
+
+    app_py           = file("${path.module}/app/app.py")
+    app_requirements = file("${path.module}/app/requirements.txt")
+    app_dockerfile   = file("${path.module}/app/Dockerfile")
+
+    prometheus_yml = file("${path.module}/prometheus/prometheus.yml")
+
+    dashboard_json = file("${path.module}/grafana/dashboard.json")
+
+    ai_sre_py       = file("${path.module}/ai-sre/ai_sre.py")
+    ai_requirements = file("${path.module}/ai-sre/requirements.txt")
+
+    inject_failure_sh = file("${path.module}/scripts/inject_failure.sh")
+    recover_sh        = file("${path.module}/scripts/recover.sh")
+    validate_sh       = file("${path.module}/scripts/validate.sh")
+  }))
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 20
+    encrypted   = true
+  }
+
+  tags = {
+    Name        = "${var.project_name}-ec2"
+    Project     = var.project_name
+    Environment = "exam"
+  }
+}
+
+
+.............................................................................................................
+
+
+create outputs.tf with below config: (Line 421-443)
+
+
+.............................
+
+
+output "instance_id" {
+  value = aws_instance.sre_lab.id
+}
+
+output "public_ip" {
+  value = aws_instance.sre_lab.public_ip
+}
+
+output "order_api_url" {
+  value = "http://${aws_instance.sre_lab.public_ip}:8000"
+}
+
+output "grafana_url" {
+  value = "http://${aws_instance.sre_lab.public_ip}:3000"
+}
+
+output "prometheus_url" {
+  value = "http://${aws_instance.sre_lab.public_ip}:9090"
+}
+
+output "ssh_command" {
+  value = "ssh ubuntu@${aws_instance.sre_lab.public_ip}"
+}
+
+..................................
+
+
+#### Now, create user_data.sh with below config: (Line 452-792) ## This is what makes the entire environment automated.
+
+...................................
+
+#!/bin/bash
+
+set -euxo pipefail
+
+PROJECT_DIR="/opt/${project_name}"
+
+echo "=============================================="
+echo "AI SRE LAB BOOTSTRAP"
+echo "=============================================="
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+
+apt-get install -y \
+    docker.io \
+    docker-compose-v2 \
+    python3 \
+    python3-pip \
+    curl \
+    jq \
+    unzip \
+    git
+
+systemctl enable docker
+systemctl start docker
+
+mkdir -p "$${PROJECT_DIR}"
+
+mkdir -p "$${PROJECT_DIR}/app"
+mkdir -p "$${PROJECT_DIR}/prometheus"
+mkdir -p "$${PROJECT_DIR}/grafana"
+mkdir -p "$${PROJECT_DIR}/ai-sre"
+mkdir -p "$${PROJECT_DIR}/scripts"
+mkdir -p "$${PROJECT_DIR}/reports"
+
+# -------------------------------------------------
+# Application
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/app/app.py" <<'APP_EOF'
+${app_py}
+APP_EOF
+
+cat > "$${PROJECT_DIR}/app/requirements.txt" <<'REQ_EOF'
+${app_requirements}
+REQ_EOF
+
+cat > "$${PROJECT_DIR}/app/Dockerfile" <<'DOCKER_EOF'
+${app_dockerfile}
+DOCKER_EOF
+
+# -------------------------------------------------
+# Prometheus
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/prometheus/prometheus.yml" <<'PROM_EOF'
+${prometheus_yml}
+PROM_EOF
+
+# -------------------------------------------------
+# Grafana
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/grafana/dashboard.json" <<'GRAF_EOF'
+${dashboard_json}
+GRAF_EOF
+
+# -------------------------------------------------
+# AI SRE
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/ai-sre/ai_sre.py" <<'AI_EOF'
+${ai_sre_py}
+AI_EOF
+
+cat > "$${PROJECT_DIR}/ai-sre/requirements.txt" <<'AI_REQ_EOF'
+${ai_requirements}
+AI_REQ_EOF
+
+# -------------------------------------------------
+# Scripts
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/scripts/inject_failure.sh" <<'INJECT_EOF'
+${inject_failure_sh}
+INJECT_EOF
+
+cat > "$${PROJECT_DIR}/scripts/recover.sh" <<'RECOVER_EOF'
+${recover_sh}
+RECOVER_EOF
+
+cat > "$${PROJECT_DIR}/scripts/validate.sh" <<'VALIDATE_EOF'
+${validate_sh}
+VALIDATE_EOF
+
+chmod +x "$${PROJECT_DIR}/scripts/"*.sh
+
+# -------------------------------------------------
+# Docker Compose
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/docker-compose.yml" <<'COMPOSE_EOF'
+services:
+
+  order-service:
+
+    build:
+      context: ./app
+
+    container_name: order-service
+
+    environment:
+      FAILURE_MODE: "true"
+
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped
+
+  prometheus:
+
+    image: prom/prometheus:v3.5.0
+
+    container_name: prometheus
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+    ports:
+      - "9090:9090"
+
+    depends_on:
+      - order-service
+
+    restart: unless-stopped
+
+  grafana:
+
+    image: grafana/grafana:11.6.0
+
+    container_name: grafana
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboard.json:/var/lib/grafana/dashboards/ai-sre.json:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      - prometheus
+
+    restart: unless-stopped
+
+volumes:
+
+  grafana_data:
+COMPOSE_EOF
+
+# -------------------------------------------------
+# Grafana provisioning
+# -------------------------------------------------
+
+mkdir -p "$${PROJECT_DIR}/grafana/provisioning/dashboards"
+mkdir -p "$${PROJECT_DIR}/grafana/provisioning/datasources"
+
+cat > "$${PROJECT_DIR}/grafana/provisioning/datasources/prometheus.yml" <<'DS_EOF'
+apiVersion: 1
+
+datasources:
+
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+DS_EOF
+
+cat > "$${PROJECT_DIR}/grafana/provisioning/dashboards/dashboard.yml" <<'DASH_EOF'
+apiVersion: 1
+
+providers:
+
+  - name: AI-SRE
+    orgId: 1
+    folder: AI-SRE
+    type: file
+    disableDeletion: false
+    editable: true
+
+    options:
+      path: /var/lib/grafana/dashboards
+DASH_EOF
+
+# -------------------------------------------------
+# AI environment
+# -------------------------------------------------
+
+cat > "$${PROJECT_DIR}/ai-sre/.env" <<ENV_EOF
+AWS_REGION=${aws_region}
+BEDROCK_MODEL_ID=${bedrock_model}
+SLO_TARGET=${slo_target}
+ENV_EOF
+
+# -------------------------------------------------
+# Install AI dependencies
+# -------------------------------------------------
+
+python3 -m pip install \
+    --break-system-packages \
+    boto3==1.37.0 \
+    requests==2.32.3
+
+# -------------------------------------------------
+# Build and start platform
+# -------------------------------------------------
+
+cd "$${PROJECT_DIR}"
+
+docker compose build
+
+docker compose up -d
+
+# -------------------------------------------------
+# Wait for application
+# -------------------------------------------------
+
+echo "Waiting for application..."
+
+for i in $(seq 1 30); do
+
+    if curl -sf http://localhost:8000/health > /dev/null; then
+        break
+    fi
+
+    sleep 2
+
+done
+
+# -------------------------------------------------
+# Wait for Prometheus
+# -------------------------------------------------
+
+echo "Waiting for Prometheus..."
+
+for i in $(seq 1 30); do
+
+    if curl -sf http://localhost:9090/-/ready > /dev/null; then
+        break
+    fi
+
+    sleep 2
+
+done
+
+# -------------------------------------------------
+# Generate traffic
+# -------------------------------------------------
+
+(
+    while true; do
+
+        curl -s \
+            http://localhost:8000/ \
+            > /dev/null || true
+
+        curl -s \
+            http://localhost:8000/api/orders \
+            > /dev/null || true
+
+        curl -s \
+            http://localhost:8000/health \
+            > /dev/null || true
+
+        sleep 2
+
+    done
+
+) > /var/log/ai-sre-traffic.log 2>&1 &
+
+# -------------------------------------------------
+# Create helper commands
+# -------------------------------------------------
+
+cat > /usr/local/bin/ai-sre-investigate <<EOF
+#!/bin/bash
+cd $${PROJECT_DIR}
+python3 ai-sre/ai_sre.py investigate
+EOF
+
+cat > /usr/local/bin/ai-sre-validate <<EOF
+#!/bin/bash
+cd $${PROJECT_DIR}
+python3 ai-sre/ai_sre.py validate
+EOF
+
+cat > /usr/local/bin/ai-sre-report <<EOF
+#!/bin/bash
+cd $${PROJECT_DIR}
+python3 ai-sre/ai_sre.py report
+EOF
+
+cat > /usr/local/bin/ai-sre-recover <<EOF
+#!/bin/bash
+$${PROJECT_DIR}/scripts/recover.sh
+EOF
+
+chmod +x \
+    /usr/local/bin/ai-sre-*
+
+echo
+echo "=============================================="
+echo "AI SRE LAB READY"
+echo "=============================================="
+
+echo "Project: $${PROJECT_DIR}"
+
+echo
+echo "Services:"
+
+docker compose ps
+
+echo
+echo "Application:"
+
+curl -s http://localhost:8000/health || true
+
+echo
+echo "Bootstrap completed."
+
+............................................
+
+
+### Create app/app.py with below config: (Line 802-933)
+
+
+.............................................
+
+import os
+import time
+import logging
+
+from fastapi import FastAPI, Response
+from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST
+
+app = FastAPI(title="Order API")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+logger = logging.getLogger("order-service")
+
+FAILURE_MODE = os.getenv("FAILURE_MODE", "true").lower() == "true"
+
+REQUESTS = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status"]
+)
+
+ERRORS = Counter(
+    "http_errors_total",
+    "Total HTTP errors",
+    ["method", "path"]
+)
+
+LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration",
+    ["method", "path"]
+)
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "order-service",
+        "status": "running",
+        "failure_mode": FAILURE_MODE
+    }
+
+
+@app.get("/health")
+def health():
+    REQUESTS.labels("GET", "/health", "200").inc()
+
+    return {
+        "status": "healthy",
+        "failure_mode": FAILURE_MODE
+    }
+
+
+@app.get("/api/orders")
+def orders():
+
+    start = time.time()
+
+    if FAILURE_MODE:
+
+        time.sleep(3)
+
+        REQUESTS.labels(
+            "GET",
+            "/api/orders",
+            "500"
+        ).inc()
+
+        ERRORS.labels(
+            "GET",
+            "/api/orders"
+        ).inc()
+
+        LATENCY.labels(
+            "GET",
+            "/api/orders"
+        ).observe(time.time() - start)
+
+        logger.error(
+            "Order API failed: downstream request timeout; "
+            "operation=order_lookup latency_ms=%d",
+            int((time.time() - start) * 1000)
+        )
+
+        return Response(
+            content='{"error":"Order service degraded"}',
+            status_code=500,
+            media_type="application/json"
+        )
+
+    time.sleep(0.1)
+
+    REQUESTS.labels(
+        "GET",
+        "/api/orders",
+        "200"
+    ).inc()
+
+    LATENCY.labels(
+        "GET",
+        "/api/orders"
+    ).observe(time.time() - start)
+
+    logger.info(
+        "Order request completed successfully latency_ms=%d",
+        int((time.time() - start) * 1000)
+    )
+
+    return {
+        "orders": [
+            {
+                "id": "ORD-1001",
+                "status": "PROCESSING"
+            },
+            {
+                "id": "ORD-1002",
+                "status": "COMPLETED"
+            }
+        ]
+    }
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(
+        generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
+..............................................................
+
+### create app/requirements.txt with below config: (Line 941-943)
+
+..............................................................
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+prometheus-client==0.21.1
+
+..............................................................
+
+
+### create app/Dockerfile with below config: (Line 953-965)
+
+
+...............................................................
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+...............................................................
+
+
+### create prometheus/prometheus.yml with below config: (Line 974-986)
+
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+
+  - job_name: "order-service"
+
+    static_configs:
+      - targets:
+          - "order-service:8000"
+
+    metrics_path: "/metrics"
+
+
+..................................................................
+
+### create grafana/dashboard.json with below config: (Line 997 - 1131)
+
+
+..............................................................
+
+{
+  "title": "AI SRE - Order Service",
+  "uid": "ai-sre-order",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m]))",
+          "legendFormat": "requests/sec"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Error Rate %",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "legendFormat": "error %"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "P95 Latency",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000",
+          "legendFormat": "p95 ms"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "HTTP 500 Errors",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_errors_total[1m]))",
+          "legendFormat": "errors/sec"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Availability %",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "100 * (1 - (sum(increase(http_requests_total{status=~\"5..\"}[5m])) / sum(increase(http_requests_total[5m]))))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "SLO Target",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "SLO Status",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "100 * (1 - (sum(increase(http_requests_total{status=~\"5..\"}[5m])) / sum(increase(http_requests_total[5m])))) >= 99"
+        }
+      ]
+    }
+  ]
+}
+
+..............................................................
+
+### create ai-sre/requirements.txt with below config: (Line 1139-1140)
+
+....................
+
+boto3==1.37.0
+requests==2.32.3
+
+...........................
+
+
+### create ai-sre/ai_sre.py with below config: (Line 1149-1729)
+
+............................
+
+import os
+import sys
+import json
+import time
+import subprocess
+from datetime import datetime, timezone
+
+import boto3
+import requests
+
+
+PROMETHEUS_URL = "http://localhost:9090"
+
+AWS_REGION = os.getenv(
+    "AWS_REGION",
+    "us-east-2"
+)
+
+MODEL_ID = os.getenv(
+    "BEDROCK_MODEL_ID",
+    "amazon.nova-lite-v1:0"
+)
+
+SLO_TARGET = float(
+    os.getenv(
+        "SLO_TARGET",
+        "99"
+    )
+)
+
+
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name=AWS_REGION
+)
+
+
+def query_prometheus(query):
+    try:
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/query",
+            params={"query": query},
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        results = data.get("data", {}).get("result", [])
+
+        if not results:
+            return None
+
+        return results[0]["value"][1]
+
+    except Exception as e:
+        print(f"Prometheus query failed: {e}")
+        return None
+
+
+def get_metrics():
+    error_rate = query_prometheus(
+        '100 * sum(rate(http_requests_total{status=~"5.."}[1m])) '
+        '/ sum(rate(http_requests_total[1m]))'
+    )
+
+    p95 = query_prometheus(
+        'histogram_quantile(0.95, '
+        'sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000'
+    )
+
+    requests_5m = query_prometheus(
+        'sum(increase(http_requests_total[5m]))'
+    )
+
+    errors_5m = query_prometheus(
+        'sum(increase(http_requests_total{status=~"5.."}[5m]))'
+    )
+
+    error_rate = float(error_rate) if error_rate is not None else 0.0
+    p95 = float(p95) if p95 is not None else 0.0
+    requests_5m = float(requests_5m) if requests_5m is not None else 0.0
+    errors_5m = float(errors_5m) if errors_5m is not None else 0.0
+
+    availability = 100.0 - error_rate
+
+    slo_status = (
+        "BREACHED"
+        if availability < SLO_TARGET
+        else "HEALTHY"
+    )
+
+    return {
+        "error_rate_percent": error_rate,
+        "p95_latency_ms": p95,
+        "requests_last_5m": requests_5m,
+        "errors_last_5m": errors_5m,
+        "availability_percent": availability,
+        "slo_target_percent": SLO_TARGET,
+        "slo_status": slo_status
+    }
+def get_application_logs():
+
+    try:
+
+        result = subprocess.run(
+            [
+                "docker",
+                "logs",
+                "--tail",
+                "80",
+                "order-service"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        return result.stdout[-8000:]
+
+    except Exception as exc:
+
+        return f"Unable to retrieve logs: {exc}"
+
+
+def build_evidence():
+
+    metrics = get_metrics()
+
+    logs = get_application_logs()
+
+    evidence = {
+        "timestamp_utc": datetime.now(
+            timezone.utc
+        ).isoformat(),
+
+        "service": "order-service",
+
+        "metrics": metrics,
+
+        "application_logs": logs,
+
+        "observed_slo_status": (
+            "BREACHED"
+            if isinstance(
+                metrics["availability_percent"],
+                (float, int)
+            )
+            and metrics["availability_percent"] < SLO_TARGET
+            else "NOT_BREACHED"
+        )
+    }
+
+    return evidence
+
+
+def ask_ai(evidence):
+
+    prompt = f"""
+You are an SRE incident investigation assistant.
+
+Analyze ONLY the evidence provided below.
+
+Rules:
+
+1. Use only the supplied metrics and application logs.
+2. Do not invent databases, external APIs, infrastructure,
+   network failures, deployments, or dependencies.
+3. Clearly distinguish observed facts from hypotheses.
+4. If the evidence directly identifies the application failure
+   mode, state that as the root-cause hypothesis.
+5. Do not execute remediation.
+6. Human SRE approval is required before remediation.
+7. Availability below the SLO target means BREACHED.
+8. Availability equal to or above the SLO target means HEALTHY.
+
+Evidence:
+
+{json.dumps(evidence, indent=2)}
+
+Return JSON only:
+
+{{
+  "incident": "...",
+  "severity": "...",
+  "affected_service": "...",
+  "customer_impact": "...",
+  "observed_facts": [],
+  "root_cause_hypothesis": "...",
+  "confidence": "...",
+  "recommended_action": "...",
+  "validation": [],
+  "slo_status": "BREACHED or HEALTHY"
+}}
+"""
+
+    response = bedrock.converse(
+
+        modelId=MODEL_ID,
+
+        system=[
+            {
+                "text":
+                "You are an experienced production SRE and incident investigator."
+            }
+        ],
+
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+
+        inferenceConfig={
+            "maxTokens": 1200,
+            "temperature": 0.1,
+            "topP": 0.9
+        }
+    )
+
+    text = response[
+        "output"
+    ][
+        "message"
+    ][
+        "content"
+    ][0][
+        "text"
+    ]
+
+    return text
+
+
+def save_artifact(
+    filename,
+    content
+):
+
+    os.makedirs(
+        "/opt/ai-sre-lab/reports",
+        exist_ok=True
+    )
+
+    path = (
+        "/opt/ai-sre-lab/reports/"
+        + filename
+    )
+
+    with open(
+        path,
+        "w"
+    ) as file:
+
+        file.write(content)
+
+    return path
+
+
+def investigation():
+
+    print("\n====================================")
+    print("AI SRE INCIDENT INVESTIGATION")
+    print("====================================\n")
+
+    evidence = build_evidence()
+
+    print("Collected Evidence:")
+    print(
+        json.dumps(
+            evidence,
+            indent=2
+        )
+    )
+
+    print("\nCalling Amazon Bedrock...\n")
+
+    try:
+
+        analysis = ask_ai(
+            evidence
+        )
+
+    except Exception as exc:
+
+        analysis = json.dumps(
+            {
+                "error":
+                f"Bedrock invocation failed: {exc}"
+            },
+            indent=2
+        )
+
+    print("\nAI RCA:")
+    print(analysis)
+
+    save_artifact(
+        "latest_evidence.json",
+        json.dumps(
+            evidence,
+            indent=2
+        )
+    )
+
+    save_artifact(
+        "latest_ai_rca.json",
+        analysis
+    )
+
+
+def validation():
+
+    print("\n====================================")
+    print("SRE VALIDATION")
+    print("====================================\n")
+
+    time.sleep(5)
+
+    metrics = get_metrics()
+
+    print(
+        json.dumps(
+            metrics,
+            indent=2
+        )
+    )
+
+    try:
+
+        error_rate = float(
+            metrics["error_rate_percent"]
+        )
+
+        p95 = float(
+            metrics["p95_latency_ms"]
+        )
+
+        availability = float(
+            metrics["availability_percent"]
+        )
+
+        checks = {
+
+            "error_rate":
+                error_rate < 1.0,
+
+            "p95_latency":
+                p95 < 1000,
+
+            "availability":
+                availability >= SLO_TARGET
+        }
+
+    except Exception:
+
+        checks = {
+            "error_rate": False,
+            "p95_latency": False,
+            "availability": False
+        }
+
+    print("\nValidation Results:")
+
+    for check, result in checks.items():
+
+        print(
+            f"{check}: "
+            f"{'PASS' if result else 'FAIL'}"
+        )
+
+    passed = all(
+        checks.values()
+    )
+
+    print(
+        "\nOVERALL:",
+        "PASS" if passed else "FAIL"
+    )
+
+    result = {
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
+
+        "metrics": metrics,
+
+        "checks": checks,
+
+        "overall": (
+            "PASS"
+            if passed
+            else "FAIL"
+        )
+    }
+
+    save_artifact(
+        "validation.json",
+        json.dumps(
+            result,
+            indent=2
+        )
+    )
+
+
+def incident_report():
+
+    print("\n====================================")
+    print("AI SRE INCIDENT REPORT")
+    print("====================================\n")
+
+    evidence_path = (
+        "/opt/ai-sre-lab/reports/"
+        "latest_evidence.json"
+    )
+
+    rca_path = (
+        "/opt/ai-sre-lab/reports/"
+        "latest_ai_rca.json"
+    )
+
+    validation_path = (
+        "/opt/ai-sre-lab/reports/"
+        "validation.json"
+    )
+
+    def read_file(path):
+
+        try:
+
+            with open(path) as f:
+                return f.read()
+
+        except Exception:
+            return "Not available"
+
+    evidence = read_file(
+        evidence_path
+    )
+
+    rca = read_file(
+        rca_path
+    )
+
+    validation_result = read_file(
+        validation_path
+    )
+
+    prompt = f"""
+Create a concise production incident report.
+
+Use only the supplied evidence.
+
+Include:
+
+- Incident summary
+- Customer impact
+- Detection
+- Timeline
+- Observed evidence
+- Root cause
+- Root cause confidence
+- Remediation
+- Validation
+- SLO impact
+- Preventive actions
+- AI contribution
+- Human decisions
+
+Clearly distinguish facts from hypotheses.
+
+Evidence:
+
+{evidence}
+
+AI RCA:
+
+{rca}
+
+Validation:
+
+{validation_result}
+"""
+
+    try:
+
+        response = bedrock.converse(
+
+            modelId=MODEL_ID,
+
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+
+            inferenceConfig={
+                "maxTokens": 1800,
+                "temperature": 0.1
+            }
+        )
+
+        report = response[
+            "output"
+        ][
+            "message"
+        ][
+            "content"
+        ][0][
+            "text"
+        ]
+
+    except Exception as exc:
+
+        report = (
+            "Unable to generate AI report: "
+            + str(exc)
+        )
+
+    path = save_artifact(
+        "incident_report.md",
+        report
+    )
+
+    print(report)
+
+    print(
+        f"\nReport saved to: {path}"
+    )
+
+
+def main():
+
+    command = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else "investigate"
+    )
+
+    if command == "investigate":
+
+        investigation()
+
+    elif command == "validate":
+
+        validation()
+
+    elif command == "report":
+
+        incident_report()
+
+    else:
+
+        print(
+            "Usage:"
+        )
+
+        print(
+            "python3 ai_sre.py investigate"
+        )
+
+        print(
+            "python3 ai_sre.py validate"
+        )
+
+        print(
+            "python3 ai_sre.py report"
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
+.........................................
+
+### create scripts/inject_failure.sh with below config: (Line 1739-1757)
+### Failure injection
+
+..........................................
+
+#!/bin/bash
+
+set -e
+
+cd /opt/ai-sre-lab
+
+echo "Injecting application failure..."
+
+sed -i 's/FAILURE_MODE: "false"/FAILURE_MODE: "true"/' docker-compose.yml
+
+docker compose up -d --force-recreate order-service
+
+echo
+echo "Failure injected."
+
+echo
+echo "Testing degraded API:"
+
+curl -i http://localhost:8000/api/orders
+
+
+............................................
+
+
+### create scripts/recover.sh with below config: (Line 1768-1815)
+### Remediation script
+
+.................................
+
+#!/bin/bash
+
+set -e
+
+cd /opt/ai-sre-lab
+
+echo "======================================"
+echo "SRE REMEDIATION"
+echo "======================================"
+
+echo
+echo "Disabling failure mode..."
+
+sed -i 's/FAILURE_MODE: "true"/FAILURE_MODE: "false"/' docker-compose.yml
+
+echo
+echo "Recreating order-service..."
+
+docker compose up -d --force-recreate order-service
+
+echo
+echo "Waiting for service..."
+
+for i in $(seq 1 30); do
+    if curl -sf http://localhost:8000/health > /dev/null; then
+        echo "Order service is healthy."
+        break
+    fi
+
+    sleep 2
+done
+
+echo
+echo "Container status:"
+docker compose ps
+
+echo
+echo "Health check:"
+curl -f http://localhost:8000/health
+
+echo
+echo
+echo "Testing order API:"
+curl -f http://localhost:8000/api/orders
+
+echo
+echo
+echo "Remediation completed."
+
+...................................................
+
+
+### create scripts/validate.sh with below config: (Line 1786-1834)
+### Validation script
+
+
+.......................
+
+#!/bin/bash
+
+set -e
+
+echo "======================================"
+echo "AUTOMATED SRE VALIDATION"
+echo "======================================"
+
+python3 /opt/ai-sre-lab/ai-sre/ai_sre.py validate
+
+.......................
+
+
+#### Deploy everything 
+
+terraform init
+terraform plan
+terraform apply -auto-approve
+
+You will see an output like this: 
+
+..................
+
+Outputs:
+
+grafana_url = "http://x.x.x.x:3000"
+instance_id = "i-xxxxxxxx"
+order_api_url = "http://x.x.x.x:8000"
+prometheus_url = "http://x.x.x.x:9090"
+public_ip = "x.x.x.x"
+ssh_command = "ssh ubuntu@x.x.x.x"
+
+..................
+
+Now, lets AI do the JOB with below Input: 
+
+STEP 1: 
+
+### AI investigation
+
+..................
+
+sudo ai-sre-investigate
+
+..................
+
+This collects:
+
+Prometheus metrics
+        +
+Application logs
+        +
+SLO status
+        ↓
+Evidence package
+        ↓
+Amazon Bedrock
+        ↓
+AI RCA
+
+# The AI should produce something similar to:
+
+.....................................
+
+{
+  "incident": "Order API degradation",
+  "severity": "SEV-2",
+  "affected_service": "order-service",
+  "customer_impact": "Order requests are returning HTTP 500 responses and experiencing elevated latency.",
+  "observed_facts": [
+    "HTTP 500 responses are increasing",
+    "P95 latency is approximately 3000 ms",
+    "Application logs report downstream request timeout",
+    "Availability is below the 99% SLO"
+  ],
+  "root_cause_hypothesis": "The order-service is operating in an injected failure mode that introduces a downstream timeout and HTTP 500 responses.",
+  "confidence": "High",
+  "recommended_action": "Disable the failure mode and restart the service.",
+  "validation": [
+    "HTTP 500 rate falls below 1%",
+    "P95 latency falls below 1000 ms",
+    "Availability returns above 99%"
+  ],
+  "slo_status": "BREACHED"
+}
+
+.....................................
+
+STEP 2: 
+
+### AI Remediation:
+
+.............................
+
+sudo ai-sre-recover
+
+............................
+
+# This changes:
+FAILURE_MODE=true
+
+to:
+FAILURE_MODE=false
+
+and restarts the application.
+
+..................
+
+STEP 3: 
+
+## AI Automated validation: 
+
+..................
+
+
+sudo ai-sre-validate
+
+.................
+
+
+Expected conceptually:
+
+error_rate: PASS
+p95_latency: PASS
+availability: PASS
+
+OVERALL: PASS
+
+For example:
+Error rate:       0.4%
+P95 latency:      145 ms
+Availability:     99.6%
+SLO:              99%
+
+OVERALL: PASS
+
+
+..........................................
+
+STEP 4: 
+
+## Generate the final AI incident report: 
+
+..............................
+
+sudo ai-sre-report
+
+..............................
+
+It generates:
+
+/opt/ai-sre-lab/reports/incident_report.md
+
+The report contains:
+Incident Summary
+Customer Impact
+Detection
+Timeline
+Observed Evidence
+Root Cause
+Root Cause Confidence
+Remediation
+Validation
+SLO Impact
+Preventive Actions
+AI Contribution
+Human Decisions
+
+.....................................
+
+
+
+Troubleshooting Commands: 
+
+terraform output order_api_url
+curl http://<PUBLIC-IP>:8000/
+curl http://<PUBLIC-IP>:8000/api/orders
+terraform output grafana_url
+docker compose ps
+docker logs order-service
+
+
+
+..................................................................
+
+              SRE TRANSFORMATION
+
+                   INCIDENT
+                       │
+                       ▼
+                OBSERVABILITY
+                       │
+              ┌────────┴────────┐
+              │                 │
+           Metrics             Logs
+              │                 │
+              └────────┬────────┘
+                       ▼
+                 AI INVESTIGATION
+                       │
+                       ▼
+                    AI RCA
+                       │
+                       ▼
+                HUMAN DECISION
+                       │
+                       ▼
+                  REMEDIATION
+                       │
+                       ▼
+              AUTOMATED VALIDATION
+                       │
+                       ▼
+                      SLO
+                       │
+                       ▼
+                AI INCIDENT REPORT
