@@ -2012,6 +2012,20 @@ curl http://<PUBLIC-IP>:8000/api/orders
 terraform output grafana_url
 docker compose ps
 docker logs order-service
+/opt/ai-sre-lab/reports/incident_report.md
+docker ps -a
+docker compose stop order-service
+docker compose rm -f order-service
+sudo docker rm -f order-service
+sudo docker compose up -d order-service
+
+docker compose run -d \
+  --name order-service \
+  -e FAILURE_MODE=false \
+  order-service
+
+sudo chmod +x /opt/ai-sre-lab/scripts/recover.sh
+sudo chmod +x /opt/ai-sre-lab/scripts/inject_failure.sh
 
 
 
