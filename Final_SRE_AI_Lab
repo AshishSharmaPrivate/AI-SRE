@@ -1866,7 +1866,7 @@ ssh_command = "ssh ubuntu@x.x.x.x"
 
 ..................
 
-Now, lets AI do the JOB with below Input: 
+Now, lets AI do the JOB with below Input:  Login to your ec2 Instance and run below command 
 
 STEP 1: 
 
